@@ -72,17 +72,20 @@ class OrderBook(WebsocketClient):
             return
 
         msg_type = message['type']
+        book_change = None
         if msg_type == 'open':
-            self.add(message)
+            book_change = self.add(message)
         elif msg_type == 'done' and 'price' in message:
-            self.remove(message)
+            book_change = self.remove(message)
         elif msg_type == 'match':
-            self.match(message)
+            book_change = self.match(message)
             self._current_ticker = message
         elif msg_type == 'change':
-            self.change(message)
+            book_change = self.change(message)
 
         self._sequence = sequence
+
+        return book_change
 
     def on_sequence_gap(self, gap_start, gap_end):
         self.reset_book()
@@ -112,8 +115,11 @@ class OrderBook(WebsocketClient):
                 asks.append(order)
             self.set_asks(order['price'], asks)
 
+        return order['price'], order['size']
+
     def remove(self, order):
         price = Decimal(order['price'])
+        size = Decimal(order['size'])
         if order['side'] == 'buy':
             bids = self.get_bids(price)
             if bids is not None:
@@ -130,6 +136,7 @@ class OrderBook(WebsocketClient):
                     self.set_asks(price, asks)
                 else:
                     self.remove_asks(price)
+        return price, -size
 
     def match(self, order):
         size = Decimal(order['size'])
@@ -156,29 +163,33 @@ class OrderBook(WebsocketClient):
                 asks[0]['size'] -= size
                 self.set_asks(price, asks)
 
+        return price, -size
+
     def change(self, order):
         try:
             new_size = Decimal(order['new_size'])
         except KeyError:
-            return
+            return None
 
         try:
             price = Decimal(order['price'])
         except KeyError:
-            return
+            return None
 
         if order['side'] == 'buy':
             bids = self.get_bids(price)
             if bids is None or not any(o['id'] == order['order_id'] for o in bids):
-                return
+                return None
             index = [b['id'] for b in bids].index(order['order_id'])
+            old_size = bids[index]['size']
             bids[index]['size'] = new_size
             self.set_bids(price, bids)
         else:
             asks = self.get_asks(price)
             if asks is None or not any(o['id'] == order['order_id'] for o in asks):
-                return
+                return None
             index = [a['id'] for a in asks].index(order['order_id'])
+            old_size = asks[index]['size']
             asks[index]['size'] = new_size
             self.set_asks(price, asks)
 
@@ -186,7 +197,10 @@ class OrderBook(WebsocketClient):
         node = tree.get(price)
 
         if node is None or not any(o['id'] == order['order_id'] for o in node):
-            return
+            return None
+
+        size_change = new_size - old_size
+        return price, size_change
 
     def get_current_ticker(self):
         return self._current_ticker
