@@ -11,6 +11,12 @@ import pickle
 from cbpro.public_client import PublicClient
 from cbpro.websocket_client import WebsocketClient
 
+def is_bid_side(m):
+    if hasattr(m, 'strip'):
+        return m[0] == "b"
+    else:
+        return is_bid_side(m['side'])
+
 
 class OrderBook(WebsocketClient):
     def __init__(self, product_id='BTC-USD', log_to=None):
@@ -63,26 +69,28 @@ class OrderBook(WebsocketClient):
         sequence = message.get('sequence', -1)
         if self._sequence == -1:
             self.reset_book()
-            return
+            return 'Reset book due to negative sequence'
         if sequence <= self._sequence:
             # ignore older messages (e.g. before order book initialization from getProductOrderBook)
-            return
+            return 'Current book sequence beyond this order'
         elif sequence > self._sequence + 1:
             self.on_sequence_gap(self._sequence, sequence)
-            return
+            return 'Sequence gap to this order'
 
         msg_type = message['type']
-        book_change = None
+        book_change = 'Untreated message type'
         if msg_type == 'open':
             book_change = self.add(message)
         elif msg_type == 'done' and 'price' in message:
             book_change = self.remove(message)
         elif msg_type == 'match':
             book_change = self.match(message)
-            self._current_ticker = message
         elif msg_type == 'change':
             book_change = self.change(message)
+        elif msg_type == 'received':
+            book_change = None
 
+        self._current_ticker = message.get('product_id')
         self._sequence = sequence
 
         return book_change
@@ -91,7 +99,6 @@ class OrderBook(WebsocketClient):
         self.reset_book()
         print('Error: messages missing ({} - {}). Re-initializing  book at sequence.'.format(
             gap_start, gap_end, self._sequence))
-
 
     def add(self, order):
         order = {
@@ -119,19 +126,29 @@ class OrderBook(WebsocketClient):
 
     def remove(self, order):
         price = Decimal(order['price'])
-        size = Decimal(order['size'])
+        size = Decimal(order.get('size', 0))
         if order['side'] == 'buy':
-            bids = self.get_bids(price)
-            if bids is not None:
-                bids = [o for o in bids if o['id'] != order['order_id']]
+            fbids = self.get_bids(price)
+            if fbids is not None:
+                bids = []
+                for o in fbids:
+                    if o['id'] != order['order_id']:
+                        bids.append(o)
+                    else:
+                        size = o['size']
                 if len(bids) > 0:
-                    self.set_bids(price, bids)
+                    self.set_bids(price, fbids)
                 else:
                     self.remove_bids(price)
         else:
-            asks = self.get_asks(price)
-            if asks is not None:
-                asks = [o for o in asks if o['id'] != order['order_id']]
+            fasks = self.get_asks(price)
+            if fasks is not None:
+                asks = []
+                for o in fasks:
+                    if o['id'] != order['order_id']:
+                        asks.append(o)
+                    else:
+                        size = o['size']
                 if len(asks) > 0:
                     self.set_asks(price, asks)
                 else:
@@ -145,7 +162,7 @@ class OrderBook(WebsocketClient):
         if order['side'] == 'buy':
             bids = self.get_bids(price)
             if not bids:
-                return
+                return 'Failed to find bids at this price for match'
             assert bids[0]['id'] == order['maker_order_id']
             if bids[0]['size'] == size:
                 self.set_bids(price, bids[1:])
@@ -155,7 +172,7 @@ class OrderBook(WebsocketClient):
         else:
             asks = self.get_asks(price)
             if not asks:
-                return
+                return 'Failed to find asks at this price for match'
             assert asks[0]['id'] == order['maker_order_id']
             if asks[0]['size'] == size:
                 self.set_asks(price, asks[1:])
@@ -169,17 +186,17 @@ class OrderBook(WebsocketClient):
         try:
             new_size = Decimal(order['new_size'])
         except KeyError:
-            return None
+            return 'Failed to find new size at this price for change'
 
         try:
             price = Decimal(order['price'])
         except KeyError:
-            return None
+            return 'Failed to find new price for change'
 
         if order['side'] == 'buy':
             bids = self.get_bids(price)
             if bids is None or not any(o['id'] == order['order_id'] for o in bids):
-                return None
+                return 'Failed to find bids at this price for change'
             index = [b['id'] for b in bids].index(order['order_id'])
             old_size = bids[index]['size']
             bids[index]['size'] = new_size
@@ -187,17 +204,17 @@ class OrderBook(WebsocketClient):
         else:
             asks = self.get_asks(price)
             if asks is None or not any(o['id'] == order['order_id'] for o in asks):
-                return None
+                return 'Failed to find asks at this price for change'
             index = [a['id'] for a in asks].index(order['order_id'])
             old_size = asks[index]['size']
             asks[index]['size'] = new_size
             self.set_asks(price, asks)
 
-        tree = self._asks if order['side'] == 'sell' else self._bids
+        tree = self._bids if is_bid_side(order['side']) else  self._asks
         node = tree.get(price)
 
         if node is None or not any(o['id'] == order['order_id'] for o in node):
-            return None
+            return 'Failed to find node at this price for change'
 
         size_change = new_size - old_size
         return price, size_change
