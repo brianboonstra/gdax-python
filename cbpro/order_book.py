@@ -7,9 +7,13 @@
 from sortedcontainers import SortedDict
 from decimal import Decimal
 import pickle
+import logging
 
 from cbpro.public_client import PublicClient
 from cbpro.websocket_client import WebsocketClient
+
+logger = logging.getLogger(__name__)
+
 
 def is_bid_side(m):
     if hasattr(m, 'strip'):
@@ -83,12 +87,16 @@ class OrderBook(WebsocketClient):
             book_change = self.add(message)
         elif msg_type == 'done' and 'price' in message:
             book_change = self.remove(message)
+        elif msg_type == 'done' and message.get('reason') == 'filled':
+            book_change = self.remove(message)
         elif msg_type == 'match':
             book_change = self.match(message)
         elif msg_type == 'change':
             book_change = self.change(message)
         elif msg_type == 'received':
             book_change = None
+        else:
+            logger.info("Untreated message type %s: %s", msg_type, message)
 
         self._current_ticker = message.get('product_id')
         self._sequence = sequence
@@ -125,19 +133,24 @@ class OrderBook(WebsocketClient):
         return order['price'], order['size']
 
     def remove(self, order):
-        price = Decimal(order['price'])
-        size = Decimal(order.get('size', 0))
+        found_order = False
+        removal_id = order.get('order_id')
+        price = Decimal(order.get('price', -1))
+        size = Decimal(order.get('remaining_size', order.get('size', 0)))
         if order['side'] == 'buy':
             fbids = self.get_bids(price)
             if fbids is not None:
                 bids = []
                 for o in fbids:
-                    if o['id'] != order['order_id']:
+                    if o['id'] != removal_id:
                         bids.append(o)
                     else:
                         size = o['size']
+                        if price == -1:
+                            price = o['price']
+                        found_order = True
                 if len(bids) > 0:
-                    self.set_bids(price, fbids)
+                    self.set_bids(price, bids)
                 else:
                     self.remove_bids(price)
         else:
@@ -145,14 +158,22 @@ class OrderBook(WebsocketClient):
             if fasks is not None:
                 asks = []
                 for o in fasks:
-                    if o['id'] != order['order_id']:
+                    if o['id'] != removal_id:
                         asks.append(o)
                     else:
                         size = o['size']
+                        if price == -1:
+                            price = o['price']
+                        found_order = True
                 if len(asks) > 0:
                     self.set_asks(price, asks)
                 else:
                     self.remove_asks(price)
+        if not found_order:
+            logger.debug("Failed to find order %s for removal", removal_id)
+            size = 0
+        if price == -1:
+            price = None
         return price, -size
 
     def match(self, order):
@@ -210,7 +231,7 @@ class OrderBook(WebsocketClient):
             asks[index]['size'] = new_size
             self.set_asks(price, asks)
 
-        tree = self._bids if is_bid_side(order['side']) else  self._asks
+        tree = self._bids if is_bid_side(order['side']) else self._asks
         node = tree.get(price)
 
         if node is None or not any(o['id'] == order['order_id'] for o in node):
@@ -236,6 +257,7 @@ class OrderBook(WebsocketClient):
             except KeyError:
                 continue
             for order in this_ask:
+                # noinspection PyTypeChecker
                 result['asks'].append([order['price'], order['size'], order['id']])
         for bid in self._bids:
             try:
@@ -246,6 +268,7 @@ class OrderBook(WebsocketClient):
                 continue
 
             for order in this_bid:
+                # noinspection PyTypeChecker
                 result['bids'].append([order['price'], order['size'], order['id']])
         return result
 
@@ -256,6 +279,7 @@ class OrderBook(WebsocketClient):
         return self._asks.get(price)
 
     def remove_asks(self, price):
+        logger.debug("Deleting asks at %s", price)
         del self._asks[price]
 
     def set_asks(self, price, asks):
@@ -268,6 +292,7 @@ class OrderBook(WebsocketClient):
         return self._bids.get(price)
 
     def remove_bids(self, price):
+        logger.debug("Deleting bids at %s", price)
         del self._bids[price]
 
     def set_bids(self, price, bids):
