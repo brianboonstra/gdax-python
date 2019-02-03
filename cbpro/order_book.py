@@ -136,7 +136,7 @@ class OrderBook(WebsocketClient):
         found_order = False
         removal_id = order.get('order_id')
         price = Decimal(order.get('price', -1))
-        size = Decimal(order.get('remaining_size', order.get('size', 0)))
+        size = Decimal(order.get('size', 0))
         if order['side'] == 'buy':
             fbids = self.get_bids(price)
             if fbids is not None:
@@ -145,7 +145,9 @@ class OrderBook(WebsocketClient):
                     if o['id'] != removal_id:
                         bids.append(o)
                     else:
-                        size = o['size']
+                        osize = o['size']
+                        if osize is not None and size == 0:
+                            size = osize
                         if price == -1:
                             price = o['price']
                         found_order = True
@@ -161,7 +163,9 @@ class OrderBook(WebsocketClient):
                     if o['id'] != removal_id:
                         asks.append(o)
                     else:
-                        size = o['size']
+                        osize = o['size']
+                        if osize is not None and size == 0:
+                            size = osize
                         if price == -1:
                             price = o['price']
                         found_order = True
@@ -171,6 +175,8 @@ class OrderBook(WebsocketClient):
                     self.remove_asks(price)
         if not found_order:
             logger.debug("Failed to find order %s for removal", removal_id)
+            size = 0
+        if size is None:
             size = 0
         if price == -1:
             price = None
