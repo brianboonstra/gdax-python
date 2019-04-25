@@ -13,7 +13,7 @@ import hashlib
 import time
 from threading import Thread
 from websocket import create_connection, WebSocketConnectionClosedException
-from pymongo import MongoClient
+
 from cbpro.cbpro_auth import get_auth_headers
 
 

@@ -14,6 +14,8 @@ from cbpro.websocket_client import WebsocketClient
 
 logger = logging.getLogger(__name__)
 
+class TradeMatchUnidentifiedException(Exception):
+    pass
 
 def is_bid_side(m):
     if hasattr(m, 'strip'):
@@ -23,7 +25,7 @@ def is_bid_side(m):
 
 
 class OrderBook(WebsocketClient):
-    def __init__(self, product_id='BTC-USD', log_to=None):
+    def __init__(self, product_id='BTC-USD', log_to=None, allowable_cancel_gap=0):
         super(OrderBook, self).__init__(products=product_id)
         self._asks = SortedDict()
         self._bids = SortedDict()
@@ -33,6 +35,7 @@ class OrderBook(WebsocketClient):
         if self._log_to:
             assert hasattr(self._log_to, 'write')
         self._current_ticker = None
+        self.allowable_cancel_gap = allowable_cancel_gap
 
     @property
     def product_id(self):
@@ -67,6 +70,19 @@ class OrderBook(WebsocketClient):
         self._sequence = res['sequence']
 
     def on_message(self, message):
+        """
+        Matching notes:
+            When a taker price meets a maker price, the first thing that happens is that we
+            get a message with type 'match'.  This message contains a trade id, and is the only
+            message sent that will contain a trade ID.  It will have a maker_order_id and a
+            taker_order_id, along with a side
+
+            One or the other order will also receive a message type 'done' indicating its
+            quantity has been exhausted via the reason being set to 'filled'
+
+        :param message:
+        :return:
+        """
         if self._log_to:
             pickle.dump(message, self._log_to)
 
@@ -74,7 +90,14 @@ class OrderBook(WebsocketClient):
         if self._sequence == -1:
             self.reset_book()
             return 'Reset book due to negative sequence'
-        if sequence <= self._sequence:
+        if self.allowable_cancel_gap:
+            cancel_close_enough = (
+                    (sequence > self._sequence - self.allowable_cancel_gap)
+                    and (message.get('reason', '') == 'canceled')
+            )
+        else:
+            cancel_close_enough = False
+        if sequence <= self._sequence and not cancel_close_enough:
             # ignore older messages (e.g. before order book initialization from getProductOrderBook)
             return 'Current book sequence beyond this order'
         elif sequence > self._sequence + 1:
@@ -99,7 +122,8 @@ class OrderBook(WebsocketClient):
             logger.info("Untreated message type %s: %s", msg_type, message)
 
         self._current_ticker = message.get('product_id')
-        self._sequence = sequence
+        if sequence > self._sequence:
+            self._sequence = sequence
 
         return book_change
 
@@ -184,7 +208,13 @@ class OrderBook(WebsocketClient):
             bids = self.get_bids(price)
             if not bids:
                 return 'Failed to find bids at this price for match'
-            assert bids[0]['id'] == order['maker_order_id']
+            if not bids[0]['id'] == order['maker_order_id']:
+                raise TradeMatchUnidentifiedException(
+                    'A buy match from taker order id {tid} was reported for order '
+                    'id {oid} but the top of the bid book was {tob}'.format(
+                        oid=order['maker_order_id'], tob=bids[0]['id'],
+                        tid = order.get('taker_order_id', 'UNKNOWN')
+                    ))
             if bids[0]['size'] == size:
                 self.set_bids(price, bids[1:])
             else:
@@ -194,7 +224,13 @@ class OrderBook(WebsocketClient):
             asks = self.get_asks(price)
             if not asks:
                 return 'Failed to find asks at this price for match'
-            assert asks[0]['id'] == order['maker_order_id']
+            if not asks[0]['id'] == order['maker_order_id']:
+                raise TradeMatchUnidentifiedException(
+                    'A sell match from taker order id {tid} was reported for order '
+                    'id {oid} but the top of the bid book was {tob}'.format(
+                        oid=order['maker_order_id'], tob=asks[0]['id'],
+                        tid=order.get('taker_order_id', 'UNKNOWN')
+                    ))
             if asks[0]['size'] == size:
                 self.set_asks(price, asks[1:])
             else:
